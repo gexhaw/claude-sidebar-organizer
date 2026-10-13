@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Sidebar Organizer
 // @namespace    https://github.com/gexhaw/claude-sidebar-organizer
-// @version      1.3.1
-// @description  Color labels, sorting, and groups for Claude.ai chat history
+// @version      1.6.2
+// @description  Color labels, sorting, groups and notes for Claude.ai chat history
 // @author       gexhaw
 // @match        https://claude.ai/*
 // @grant        none
@@ -22,18 +22,54 @@
   // which keeps React intact and cannot retrigger the childList observer.
 
   const STORAGE_KEY = 'cso_data';
-  const CHAT_LINK = 'a[href*="/chat/"]';
+  // Chat links: claude.ai chats (/chat/<uuid>) and sessions (/session_<id>)
+  const CHAT_LINK = 'a[href*="/chat/"], a[href*="/session_"]';
+  // Spectrum order — also the order used by "By color" sorting
   const COLORS = [
-    { id: 'red',    hex: '#e57373' },
-    { id: 'orange', hex: '#ffa726' },
-    { id: 'yellow', hex: '#fdd835' },
-    { id: 'green',  hex: '#66bb6a' },
-    { id: 'teal',   hex: '#26a69a' },
-    { id: 'blue',   hex: '#42a5f5' },
-    { id: 'purple', hex: '#ab47bc' },
-    { id: 'pink',   hex: '#ec407a' },
+    { id: 'red',    name: 'Red',    hex: '#e57373' },
+    { id: 'orange', name: 'Orange', hex: '#ffa726' },
+    { id: 'yellow', name: 'Yellow', hex: '#fdd835' },
+    { id: 'green',  name: 'Green',  hex: '#66bb6a' },
+    { id: 'teal',   name: 'Teal',   hex: '#26a69a' },
+    { id: 'blue',   name: 'Blue',   hex: '#42a5f5' },
+    { id: 'purple', name: 'Purple', hex: '#ab47bc' },
+    { id: 'pink',   name: 'Pink',   hex: '#ec407a' },
+    { id: 'brown',  name: 'Brown',  hex: '#a1887f' },
+    { id: 'gray',   name: 'Gray',   hex: '#90a4ae' },
   ];
   const COLOR_IDS = COLORS.map(c => c.id);
+  // Presets removed in earlier versions → the preset that replaces them
+  const LEGACY = { lime: 'green', cyan: 'teal', indigo: 'blue' };
+  const HEX_RE = /^#[0-9a-f]{6}$/;
+
+  function rgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  // Closest preset to a "#rrggbb" — migrates custom colors from 1.5.0–1.6.1
+  function nearestPreset(hex) {
+    const [r, g, b] = rgb(hex);
+    let best = null;
+    let bestD = Infinity;
+    COLORS.forEach(c => {
+      const [r2, g2, b2] = rgb(c.hex);
+      const dist = (r - r2) ** 2 + (g - g2) ** 2 + (b - b2) ** 2;
+      if (dist < bestD) { bestD = dist; best = c.id; }
+    });
+    return best;
+  }
+
+  // Always returns a preset id or null
+  function normColor(c) {
+    if (typeof c !== 'string') return null;
+    if (COLOR_IDS.includes(c)) return c;
+    if (LEGACY[c]) return LEGACY[c];
+    const h = c.toLowerCase();
+    return HEX_RE.test(h) ? nearestPreset(h) : null;
+  }
+
+  const NOTE_MAX = 1000;
   const SORTS = ['default', 'name_asc', 'name_desc', 'color'];
   const SORT_LABELS = { default: 'Default', name_asc: 'A → Z', name_desc: 'Z → A', color: 'By color' };
 
@@ -85,18 +121,39 @@
   }
 
   function chatIdOf(a) {
-    const m = (a.getAttribute('href') || '').match(/\/chat\/([a-f0-9-]{8,})/i);
+    const href = a.getAttribute('href') || '';
+    const m = href.match(/\/chat\/([a-f0-9-]{8,})/i) || href.match(/\/(session_[A-Za-z0-9]{8,})/);
     return m ? m[1] : null;
   }
 
   function isOwn(node) {
-    return !!(node.closest && node.closest('#cso-menu, #cso-toolbar'));
+    return !!(node.closest && node.closest('#cso-menu, #cso-toolbar, #cso-tip'));
   }
 
+  // Sidebar chats, plus the main area when it is a chat list (the Recents page).
+  // Inside an open conversation the main area has few or no chat links, so it is skipped.
+  const LIST_MIN = 3;
   function getLinks() {
     const all = Array.from(document.querySelectorAll(CHAT_LINK)).filter(a => !isOwn(a));
-    const inNav = all.filter(a => a.closest('nav'));
-    return inNav.length ? inNav : all.filter(a => !a.closest('main'));
+    const inMain = all.filter(a => a.closest('main'));
+    const outside = all.filter(a => !a.closest('main'));
+    const inNav = outside.filter(a => a.closest('nav'));
+    const side = inNav.length ? inNav : outside;
+    return inMain.length >= LIST_MIN ? side.concat(inMain) : side;
+  }
+
+  // First visible text inside the link — the chat title without timestamps or badges
+  function titleOf(a) {
+    const w = document.createTreeWalker(a, NodeFilter.SHOW_TEXT);
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      const t = n.nodeValue.trim();
+      if (t) return t;
+    }
+    return (a.textContent || '').trim();
+  }
+
+  function hasChatLink(node) {
+    return node.nodeType === 1 && (node.matches(CHAT_LINK) || !!node.querySelector(CHAT_LINK));
   }
 
   // The element that is a direct child of the chat list container
@@ -154,7 +211,7 @@
         .cso-mini{padding:5px 10px}
       }
       #cso-menu{
-        position:fixed;z-index:2147483001;min-width:190px;max-width:240px;padding:8px;border-radius:10px;
+        position:fixed;z-index:2147483001;min-width:226px;max-width:240px;padding:8px;border-radius:10px;
         background:#2b2a27;border:1px solid rgba(255,255,255,.14);box-shadow:0 8px 32px rgba(0,0,0,.45);
         font:12px/1.3 system-ui,sans-serif;color:#eee
       }
@@ -189,6 +246,23 @@
       }
       .cso-input:focus{border-color:rgba(255,255,255,.35)}
       .cso-btnrow{display:flex;gap:4px;margin-top:6px}
+      .cso-note-input{
+        display:block;width:100%;box-sizing:border-box;min-height:56px;max-height:160px;resize:vertical;
+        margin:2px 0 0;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.15);
+        background:rgba(255,255,255,.06);color:inherit;font:inherit;line-height:1.4;outline:none
+      }
+      .cso-note-input:focus{border-color:rgba(255,255,255,.35)}
+      a[data-cso-note]{position:relative}
+      a[data-cso-note]::after{
+        content:'';position:absolute;top:0;right:0;width:0;height:0;pointer-events:none;
+        border-style:solid;border-width:0 11px 11px 0;border-color:transparent #f5c542 transparent transparent;
+        border-top-right-radius:4px
+      }
+      #cso-tip{
+        position:fixed;z-index:2147483002;display:none;max-width:280px;padding:8px 10px;border-radius:8px;
+        background:#2b2a27;border:1px solid rgba(255,255,255,.14);box-shadow:0 6px 20px rgba(0,0,0,.35);
+        font:12.5px/1.45 system-ui,sans-serif;color:#eee;white-space:pre-wrap;overflow-wrap:anywhere;pointer-events:none
+      }
       .cso-btnrow .cso-btn{flex:1}
     `;
     document.head.appendChild(style);
@@ -205,7 +279,7 @@
     };
     const colorRank = c => {
       const i = COLOR_IDS.indexOf(c);
-      return i === -1 ? COLOR_IDS.length : i;
+      return i === -1 ? COLOR_IDS.length : i; // uncolored last
     };
 
     // Collect chats per list container (Starred, Recents, etc. stay separate)
@@ -222,14 +296,18 @@
       entries.push({
         a, item, id,
         idx: entries.length,
-        title: (a.textContent || '').trim().toLowerCase(),
-        color: COLOR_IDS.includes(meta.color) ? meta.color : null,
+        title: titleOf(a).toLowerCase(),
+        color: normColor(meta.color),
         group: groups.includes(meta.group) ? meta.group : '',
+        note: typeof meta.note === 'string' && meta.note.trim() !== '',
       });
     });
 
     lists.forEach((entries, parent) => {
-      entries.forEach(e => setAttr(e.a, 'data-cso-color', e.color));
+      entries.forEach(e => {
+        setAttr(e.a, 'data-cso-color', e.color);
+        setAttr(e.a, 'data-cso-note', e.note ? '' : null);
+      });
 
       const hasGroups = entries.some(e => e.group);
       const active = d.meta.sort !== 'default' || hasGroups;
@@ -361,10 +439,12 @@
   let activeMenu = null;
 
   function closeMenu() {
+    hideTip();
     if (activeMenu) { activeMenu.remove(); activeMenu = null; }
   }
 
   function placeMenu(menu, x, y, above) {
+    hideTip();
     document.body.appendChild(menu);
     activeMenu = menu;
     const r = menu.getBoundingClientRect();
@@ -378,13 +458,13 @@
     const d = getData();
     const meta = d.chats[id] || {};
     const pick = patch => { setChat(id, patch); closeMenu(); };
-    const noColor = !COLOR_IDS.includes(meta.color);
+    const current = normColor(meta.color);
 
     const swatches = [
-      el('div', { class: 'cso-swatch cso-swatch-none' + (noColor ? ' active' : ''), title: 'No color', onclick: () => pick({ color: null }) }),
+      el('div', { class: 'cso-swatch cso-swatch-none' + (!current ? ' active' : ''), title: 'No color', onclick: () => pick({ color: null }) }),
     ].concat(COLORS.map(c => el('div', {
-      class: 'cso-swatch' + (meta.color === c.id ? ' active' : ''),
-      title: c.id, style: 'background:' + c.hex,
+      class: 'cso-swatch' + (current === c.id ? ' active' : ''),
+      title: c.name, style: 'background:' + c.hex,
       onclick: () => pick({ color: c.id }),
     })));
 
@@ -396,15 +476,69 @@
     })));
     if (!d.meta.groups.length) groupItems.push(el('div', { class: 'cso-hint', text: 'Create groups with ⊞ Groups' }));
 
+    const note = el('textarea', {
+      class: 'cso-note-input', placeholder: 'Add a note…', maxlength: String(NOTE_MAX), rows: '3',
+    });
+    note.value = meta.note || '';
+    note.addEventListener('input', () => setChat(id, { note: note.value.trim() ? note.value : '' }));
+    note.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) closeMenu();
+    });
+
     const menu = el('div', { id: 'cso-menu' }, [
       el('div', { class: 'cso-title', text: title || 'Chat' }),
       el('div', { class: 'cso-label', text: 'Color' }),
       el('div', { class: 'cso-swatches' }, swatches),
       el('div', { class: 'cso-label', text: 'Group' }),
       el('div', { class: 'cso-list' }, groupItems),
+      el('div', { class: 'cso-label', text: 'Note' }),
+      note,
     ]);
     placeMenu(menu, x, y, false);
   }
+
+  // ─── Note tooltip ─────────────────────────────────────────────────────────
+  let tip = null;
+  let tipTimer = null;
+  let tipFor = null;
+
+  function hideTip() {
+    clearTimeout(tipTimer);
+    tipTimer = null;
+    tipFor = null;
+    if (tip && tip.style.display !== 'none') tip.style.display = 'none';
+  }
+
+  function showTip(a, text) {
+    if (!tip) {
+      tip = el('div', { id: 'cso-tip', role: 'tooltip' });
+      document.body.appendChild(tip);
+    }
+    tip.textContent = text;
+    tip.style.display = 'block';
+    const r = a.getBoundingClientRect();
+    const t = tip.getBoundingClientRect();
+    let x = r.right + 8;
+    let y = r.top;
+    if (x + t.width > window.innerWidth - 8) { x = r.left; y = r.bottom + 6; }
+    tip.style.left = Math.max(8, Math.min(x, window.innerWidth - t.width - 8)) + 'px';
+    tip.style.top = Math.max(8, Math.min(y, window.innerHeight - t.height - 8)) + 'px';
+  }
+
+  document.addEventListener('mouseover', e => {
+    const a = e.target.closest && e.target.closest(CHAT_LINK);
+    if (a && a === tipFor) return;
+    hideTip();
+    if (!a || activeMenu || !a.hasAttribute('data-cso-note')) return;
+    const text = (getData().chats[chatIdOf(a)] || {}).note;
+    if (!text) return;
+    tipFor = a;
+    tipTimer = setTimeout(() => showTip(a, text), 250);
+  }, true);
+
+  document.addEventListener('scroll', hideTip, true);
+  window.addEventListener('blur', hideTip);
 
   function openGroupManager(anchor) {
     closeMenu();
@@ -490,7 +624,7 @@
     if (!a) return;
     e.preventDefault();
     e.stopPropagation();
-    openChatMenu(e.clientX, e.clientY, chatIdOf(a), (a.textContent || '').trim());
+    openChatMenu(e.clientX, e.clientY, chatIdOf(a), titleOf(a));
   }, true);
 
   // Long press on touch screens opens the same menu
@@ -508,7 +642,7 @@
     p.timer = setTimeout(() => {
       p.fired = true;
       suppressClickUntil = Date.now() + 800;
-      openChatMenu(p.x, p.y, chatIdOf(a), (a.textContent || '').trim());
+      openChatMenu(p.x, p.y, chatIdOf(a), titleOf(a));
       if (navigator.vibrate) navigator.vibrate(15);
     }, 500);
     press = p;
@@ -552,9 +686,12 @@
     scheduleApply(0);
     new MutationObserver(mutations => {
       // Ignore changes inside the chat itself (streaming replies) and our own UI
+      // Inside <main> (streaming replies, Recents rows) only react when chat links are added
       const relevant = mutations.some(m => {
         const t = m.target;
-        return t.nodeType === 1 && !t.closest('main') && !isOwn(t);
+        if (t.nodeType !== 1 || isOwn(t)) return false;
+        if (!t.closest('main')) return true;
+        return Array.prototype.some.call(m.addedNodes, hasChatLink);
       });
       if (relevant) scheduleApply();
     }).observe(document.body, { childList: true, subtree: true });
